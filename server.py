@@ -39,6 +39,7 @@ mcp = MCPServer("pydeps", lifespan=lifespan)
 class RawRequirements(TypedDict):
     source: str
     dependencies: list[str]
+    skipped: list[str]
 
 
 class RequirementDetails(TypedDict):
@@ -52,6 +53,7 @@ class DependencyList(TypedDict):
     source: str
     dependencies: list[RequirementDetails]
     unparsed: list[str]
+    skipped: list[str]
 
 
 class LatestPackage(TypedDict):
@@ -88,6 +90,7 @@ class AuditReport(TypedDict):
     summary: dict[str, int]  # e.g. {"blocked": 2, "allowed": 10, ...}
     entries: list[AuditEntry]  # sorted: blocked + major_bump first
     unparsed: list[str]
+    skipped: list[str]
     errors: dict[str, str]
 
 
@@ -118,17 +121,21 @@ def get_raw_dependencies(real_path: pathlib.Path) -> RawRequirements | None:
             return {
                 "source": "pyproject.toml",
                 "dependencies": dependencies,
+                "skipped": [],
             }
     if requirements_txt_file.is_file():
         lines = [
             line.split("#", 1)[0].strip()
             for line in requirements_txt_file.read_text(encoding="utf-8").splitlines()
         ]
+        # Option lines (-r includes, -c constraints, -e, --index-url, ...)
+        # are not followed; report them so the caller knows they were ignored.
         return {
             "source": "requirements.txt",
             "dependencies": [
                 line for line in lines if line and not line.startswith("-")
             ],
+            "skipped": [line for line in lines if line.startswith("-")],
         }
     return None
 
@@ -169,6 +176,7 @@ def read_dependencies(project_path: str) -> DependencyList:
         "source": dependencies_info["source"],
         "dependencies": parsed,
         "unparsed": unparsed,
+        "skipped": dependencies_info["skipped"],
     }
 
 
@@ -231,7 +239,9 @@ def list_dependencies(project_path: str) -> DependencyList:
     Returns:
         The dependencies found and the file they came from. Lines that
         could not be parsed are listed in `unparsed` rather than failing
-        the call.
+        the call. requirements.txt option lines (e.g. `-r other.txt`,
+        `-c constraints.txt`, `-e .`) are not followed and are listed in
+        `skipped`; read those files yourself if their contents matter.
     """
     return read_dependencies(project_path)
 
@@ -310,7 +320,8 @@ async def audit_project(project_path: str, ctx: Context[AppContext]) -> AuditRep
             check changelog_url for breaking changes before upgrading.
         summary counts entries per status, plus errors. Packages that could not
         be checked (e.g. not on PyPI) are in `errors`; lines that could not be
-        parsed are in `unparsed`.
+        parsed are in `unparsed`; requirements.txt option lines such as
+        `-r other.txt` are not followed and are listed in `skipped`.
     """
     dependencies = read_dependencies(project_path)
     client = ctx.request_context.lifespan_context.client
@@ -368,6 +379,7 @@ async def audit_project(project_path: str, ctx: Context[AppContext]) -> AuditRep
     return {
         "source": dependencies["source"],
         "unparsed": dependencies["unparsed"],
+        "skipped": dependencies["skipped"],
         "entries": audit_entries,
         "errors": errors,
         "summary": summary,

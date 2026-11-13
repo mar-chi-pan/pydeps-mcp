@@ -12,7 +12,7 @@ import httpx
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import Specifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -282,22 +282,30 @@ def upgrade_status(specifier_set: SpecifierSet | None, version: str) -> Status:
     return Status.BLOCKED
 
 
+def max_allowed_major(specifier: Specifier) -> int | None:
+    """Highest major version this specifier permits, or None if unbounded
+    above."""
+    version = Version(specifier.version.removesuffix(".*"))
+    match specifier.operator:
+        case "<":
+            # <2 or <2.0 allows only 1.x; <2.5 still allows 2.x
+            rest = version.release[1:]
+            return version.major - 1 if all(x == 0 for x in rest) else version.major
+        case "<=" | "==" | "~=":
+            return version.major
+        case _:  # >, >=, != don't cap the major
+            return None
+
+
 def major_bump(specifier_set: SpecifierSet | None, version: str) -> bool:
-    if specifier_set is None or len(specifier_set) > 1:
-        # Do not account for more complex comparisons currently
+    if specifier_set is None:
         return False
-
-    specifier = next(iter(specifier_set))
-    if specifier.operator != "==":
-        return False
-
     try:
-        previous_major = Version(specifier.version.split(".")[0]).major
         latest_major = Version(version).major
+        caps = [m for s in specifier_set if (m := max_allowed_major(s)) is not None]
     except InvalidVersion:
         return False
-
-    return previous_major < latest_major
+    return bool(caps) and latest_major > min(caps)
 
 
 @mcp.tool()
@@ -316,8 +324,9 @@ async def audit_project(project_path: str, ctx: Context[AppContext]) -> AuditRep
             version; upgrading requires changing it.
         - status "allowed": the constraint already permits the latest version.
         - status "unconstrained": no version constraint is declared.
-        - major_bump: the pinned version is behind by a major release;
-            check changelog_url for breaking changes before upgrading.
+        - major_bump: the latest version is a major release above the highest
+            version the constraint allows; check changelog_url for breaking
+            changes before upgrading.
         summary counts entries per status, plus errors. Packages that could not
         be checked (e.g. not on PyPI) are in `errors`; lines that could not be
         parsed are in `unparsed`; requirements.txt option lines such as

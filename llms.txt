@@ -1,0 +1,31 @@
+# pydeps-mcp
+
+> Read-only MCP server for auditing a Python project's dependencies against PyPI. Use it to find outdated, blocked, or majorly out-of-date dependencies and where to read about breaking changes.
+
+All tools are read-only and safe to call repeatedly. `project_path` must be an absolute path to the project root (the directory containing pyproject.toml or requirements.txt). Dependencies are read from [project].dependencies in pyproject.toml, falling back to requirements.txt.
+
+## Tools
+
+- audit_project(project_path): Start here for any "is this project up to date / what should I upgrade" question. One call checks every dependency. Returns `entries` sorted by urgency, `summary` (counts per status plus `errors`), `errors` (packages that could not be checked, keyed by name), `skipped` (option lines starting with `-`, such as `-r` includes or `--index-url`) and `unparsed` (lines that could not be parsed).
+- list_dependencies(project_path): Use when you only need what is declared, without network calls. Returns name, specifier, extras and marker per dependency. Includes the file name that declares the dependencies, any skipped lines and any unparsed dependencies.
+- check_latest(package): Use for a single package. Returns `latest_version`, `released`, `requires_python`, `provides_extra` and `changelog_url` (null if not published). Package name case and -/_ differences are fine.
+
+## Statuses (audit_project)
+
+- blocked: the declared constraint excludes the latest version. Upgrading requires changing the constraint.
+- allowed: the constraint already permits the latest version.
+- unconstrained: no version constraint is declared.
+- major_bump=true: the latest version is a major release above the highest version the constraint allows. Read changelog_url before recommending the upgrade.
+
+## Errors
+
+- "directory not found": pass an absolute path.
+- "No dependencies declared": the path is probably not the project root.
+- "declares dependencies as dynamic": read [tool.setuptools.dynamic] or setup.py instead.
+- "not found on PyPI": check spelling, or the package comes from a private index.
+- "Could not reach PyPI" / "PyPI returned 5xx": transient, retry later.
+
+## Docs
+
+- [README](README.md): install, connecting to Claude, design notes
+- [Evals](EVALS.md): prompts tested with Claude and results

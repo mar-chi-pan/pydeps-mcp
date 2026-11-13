@@ -1,0 +1,11 @@
+-r requirements-la.txt
+# Comment
+weird-line
+weird--------
+requests==2.25.0      # pinned, behind: blocked
+django==3.2           # pinned, major bump
+numpy<2               # range that excludes latest: blocked
+httpx>=0.20           # allows latest
+pydantic              # unconstrained
+my-private-lib==1.0   # not on PyPI: errors
+this is not valid===  # unparsed

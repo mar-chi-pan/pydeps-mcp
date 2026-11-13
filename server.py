@@ -1,15 +1,33 @@
+import httpx
 import logging
 import pathlib
 import tomllib
-from mcp.server.mcpserver import MCPServer
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from packaging.requirements import InvalidRequirement
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from typing import TypedDict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-mcp = MCPServer("pydeps")
+
+
+@dataclass
+class AppContext:
+    client: httpx.Client
+
+
+@asynccontextmanager
+async def lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
+    with httpx.Client(timeout=10) as client:
+        yield AppContext(client=client)
+
+
+mcp = MCPServer("pydeps", lifespan=lifespan)
 
 
 class RawRequirements(TypedDict):
@@ -28,6 +46,15 @@ class DependencyList(TypedDict):
     source: str
     dependencies: list[RequirementDetails]
     unparsed: list[str]
+
+
+class LatestPackage(TypedDict):
+    name: str
+    latest_version: str
+    released: str | None
+    requires_python: str | None
+    provides_extra: list[str]
+    changelog_url: str | None
 
 
 def get_raw_dependencies(real_path: pathlib.Path) -> RawRequirements | None:
@@ -124,6 +151,67 @@ def list_dependencies(project_path: str) -> DependencyList:
         "source": dependencies_info["source"],
         "dependencies": parsed,
         "unparsed": unparsed,
+    }
+
+
+@mcp.tool()
+def check_latest(package: str, ctx: Context[AppContext]) -> LatestPackage:
+    """Get the latest package version from PyPI.
+
+    Call this after list_dependencies, once per package you need to check.
+    Calls PyPI and returns the latest release if found, including
+    "changelog_url" which could name breaking changes.
+
+    Args:
+        package: Package name as it appears in the dependency list
+                (case and -/_ differences are fine).
+
+    Returns:
+        Latest version, its release date, supported Python versions,
+        and changelog_url (null if the project doesn't publish one).
+        Read the changelog to judge whether an upgrade has breaking changes.
+    """
+    logger.info("Getting latest release for %s", package)
+    package_name = canonicalize_name(package)
+    client = ctx.request_context.lifespan_context.client
+    try:
+        response = client.get(f"https://pypi.org/pypi/{package_name}/json")
+    except httpx.HTTPError as e:
+        raise ToolError(f"Could not reach PyPI ({e}); retry later.") from e
+
+    if response.status_code == 404:
+        raise ToolError(
+            f"'{package}' not found on PyPI. Check the spelling, or it may "
+            "come from a private index."
+        )
+    if response.is_error:
+        raise ToolError(
+            f"PyPI returned {response.status_code} for '{package}'; retry later."
+        )
+
+    content = response.json()
+
+    info = content["info"]
+    files: list[dict[str, str]] = content.get("urls") or []
+    released = files[0]["upload_time_iso_8601"] if files else None
+    project_urls: dict[str, str] = info.get("project_urls") or {}
+    by_lower = {k.lower(): v for k, v in project_urls.items()}
+    changelog_url = next(
+        (
+            by_lower[k]
+            for k in ("changelog", "changes", "release notes", "history")
+            if k in by_lower
+        ),
+        None,
+    )
+
+    return {
+        "name": canonicalize_name(info["name"]),
+        "latest_version": info["version"],
+        "provides_extra": info.get("provides_extra") or [],
+        "released": released,
+        "requires_python": info.get("requires_python") or None,
+        "changelog_url": changelog_url,
     }
 
 
